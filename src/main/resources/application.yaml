@@ -1,0 +1,4 @@
+hub:
+  adviceUrl: http://localhost:8080/AdviceCards
+  regularUrl: http://localhost:8080/RegularCards
+  feeUrl: http://localhost:8080/FeeCards
