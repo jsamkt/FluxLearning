@@ -2,13 +2,16 @@ package com.company;
 
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
+import reactor.core.Disposable;
 import reactor.core.publisher.ConnectableFlux;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 public class ReactorExample {
@@ -90,29 +93,62 @@ public class ReactorExample {
 //        TimeUnit.SECONDS.sleep(10);
 //    }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws InterruptedException {
         int request = 10;
 
-        Scheduler schedulerA = Schedulers.newParallel("Scheduler A", 200);
+//        Scheduler schedulerA = Schedulers.newParallel("Scheduler A", 200);
 //        Scheduler schedulerB = Schedulers.newParallel("Scheduler B");
 //        Scheduler schedulerC = Schedulers.newParallel("Scheduler C");
 
-        Flux<Integer> integerFlux = Flux.range(0, 100)
+//        Flux<Integer> integerFlux = Flux.range(0, 100)
 //                .publishOn(schedulerA)
-                .subscribeOn(schedulerA);
+//                .subscribeOn(schedulerA);
 
 
-                integerFlux.subscribe(subscriber(100));
-                integerFlux.subscribe(subscriber(1));
-//               ;
+//                integerFlux.subscribe(subscriber(100));
+//                integerFlux.subscribe(subscriber(1));
 
 //        schedulerA.dispose();
 //        schedulerB.dispose();
+
+        CountDownLatch cdl = new CountDownLatch(1);
+        Scheduler scheduler = Schedulers.newParallel("TEST", 10);
+
+        Disposable subscribe = Flux.range(0, 10)
+                .flatMap(i ->
+                        Mono.fromCallable(() -> {
+                                    System.out.println("                Do on next: %s - [%s]".formatted(i, Thread.currentThread().getName()));
+                                    sleep(2);
+                                    return i;
+                                }
+                        ).publishOn(scheduler)
+                )
+//                .flatMap(i -> Flux.just(i).subscribeOn(scheduler))
+                .doOnNext(i -> System.out.println("Do on next: %s - [%s]".formatted(i, Thread.currentThread().getName())))
+//                .publishOn(Schedulers.boundedElastic())
+//                .subscribeOn(Schedulers.boundedElastic())
+                .doFinally((s) -> {
+                    cdl.countDown();
+                    System.out.println("Do on finally [%s]".formatted(Thread.currentThread().getName()));
+                })
+                .subscribe(i -> System.out.println("Subscribe: %s - [%s]".formatted(i, Thread.currentThread().getName())));
+        cdl.await();
+        scheduler.dispose();
     }
 
-    public static Subscriber<Integer> subscriber(int request){
+    private static void sleep(int seconds) {
+        try {
+            TimeUnit.SECONDS.sleep(seconds);
+        } catch (InterruptedException e) {
+            System.out.println("ERROR");
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static Subscriber<Integer> subscriber(int request) {
         return new Subscriber<Integer>() {
             Subscription subscription;
+
             @Override
             public void onSubscribe(Subscription subscription) {
                 this.subscription = subscription;

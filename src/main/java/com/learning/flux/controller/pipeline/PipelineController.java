@@ -1,8 +1,6 @@
 package com.learning.flux.controller.pipeline;
 
 import com.learning.flux.dto.Card;
-import io.netty.buffer.PooledByteBufAllocatorMetric;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -29,8 +27,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 @RequestMapping(path = "/pipeline")
 public class PipelineController {
 
-    private final Scheduler shedulerB = Schedulers.fromExecutorService(Executors.newFixedThreadPool(10));
-    private final Scheduler shedulerC = Schedulers.fromExecutorService(Executors.newFixedThreadPool(10));
+    private final Scheduler shedulerB = Schedulers.newParallel("SchedulerB", 10);
+    private final Scheduler shedulerC = Schedulers.newParallel("SchedulerC", 10);
 
     private final AtomicInteger counterA = new AtomicInteger(0);
     private final AtomicInteger counterB = new AtomicInteger(0);
@@ -41,8 +39,6 @@ public class PipelineController {
             .baseUrl("http://localhost:8080/pipeline/")
             .build();
 
-    @Autowired
-    private PooledByteBufAllocatorMetric metric;
 
     @GetMapping(value = "/A/")
     public Mono<Void> getCardA() {
@@ -55,7 +51,15 @@ public class PipelineController {
                 .accept(MediaType.APPLICATION_STREAM_JSON)
                 .body(generate().doOnNext(c -> print("A")), Card.class)
                 .exchange()
-                .then();
+                .then()
+                .onErrorResume(t -> {
+                    doOnError(t, "A");
+                    return Mono.empty();
+                })
+                .doOnTerminate(() -> {
+                    counterA.set(0);
+                    counterB.set(0);
+                });
     }
 
     @PostMapping(path = "/B/",
@@ -64,29 +68,34 @@ public class PipelineController {
     public Mono<Void> getCardB(
             @RequestBody Flux<Card> flux
     ) throws InterruptedException {
-        System.out.println("Starting B controller: " + Thread.currentThread());
+        System.out.println("Starting B controller: " + Thread.currentThread().getName());
         Flux<Card> b_service_card =
 //                Flux.merge(flux,
 //                        generate()
 //                                .doOnNext(c -> c.setName("B_service_card"))
 //                )
                 flux
-                        .doOnNext(c -> counterA.decrementAndGet())
                         .doOnCancel(() -> doOnCancel("B"))
                         .doOnComplete(() -> doOnComplete("B"))
                         .doOnError((t) -> doOnError(t, "B"))
                         .doOnTerminate(() -> doOnTerminate("B"))
                         .doOnRequest(l -> doOnRequest(l, "B"))
 //                        .take(10)
-                        .publishOn(shedulerB)
-                        .doOnNext(c -> {
-                            counterB.incrementAndGet();
-                            print("B");
-                            boolean contains = list.contains(UUID.randomUUID().toString());
-                            if (contains) {
-                                System.out.println("Contains");
-                            }
-                        });
+                        .flatMap(c ->
+                                Flux.just(c).doOnNext(cc -> {
+                                            counterA.decrementAndGet();
+                                            counterB.incrementAndGet();
+                                            print("B");
+                                            boolean contains = list.contains(UUID.randomUUID().toString());
+                                            if (contains) {
+                                                System.out.println("Contains");
+                                            }
+                                        })
+                                        .subscribeOn(shedulerB)
+                        )
+                        .doOnSubscribe(sink -> sink.request(24))
+
+                ;
 //                        .doOnNext(c -> System.out.println("Flux in B: " + Thread.currentThread() + "; count: " + counterB.get()));
 
         return client
@@ -96,7 +105,11 @@ public class PipelineController {
                 .accept(MediaType.APPLICATION_STREAM_JSON)
                 .body(b_service_card, Card.class)
                 .exchange()
-                .then();
+                .then()
+                .onErrorResume(t -> {
+                    doOnError(t, "B");
+                    return Mono.empty();
+                });
     }
 
     @PostMapping(value = "/C/",
@@ -105,25 +118,33 @@ public class PipelineController {
     public Mono<Void> getCardC(
             @RequestBody Flux<Card> flux
     ) throws InterruptedException {
-        System.out.println("Starting C controller: " + Thread.currentThread());
+        System.out.println("Starting C controller: " + Thread.currentThread().getName());
         return flux
 //                .take(100)
-                .doOnNext(c -> counterB.decrementAndGet())
                 .doOnCancel(() -> doOnCancel("C"))
                 .doOnComplete(() -> doOnComplete("C"))
                 .doOnError((t) -> doOnError(t, "C"))
                 .doOnTerminate(() -> doOnTerminate("C"))
                 .doOnRequest(l -> doOnRequest(l, "C"))
-                .publishOn(shedulerB)
-                .doOnNext(c -> {
-                    print("C");
-                    boolean contains = list.contains(UUID.randomUUID().toString());
-                    if (contains) {
-                        System.out.println("Contains");
-                    }
-                })
+                .flatMap(c -> Flux.just(c)
+                                .doOnNext(cc -> {
+                                    counterB.decrementAndGet();
+                                    print("C");
+                                    boolean contains = list.contains(UUID.randomUUID().toString());
+                                    if (contains) {
+                                        System.out.println("Contains");
+                                    }
+                                })
+                        .subscribeOn(shedulerC)
+                )
+                .doOnSubscribe(sink -> sink.request(24))
+
 //                .doOnNext(card -> System.out.println("Flux in C: " + Thread.currentThread()+"; count: " + counterC.get()))
-                .then();
+                .then()
+                .onErrorResume(t -> {
+                    doOnError(t, "C");
+                    return Mono.empty();
+                });
     }
 
     private Flux<Card> generate() {
@@ -185,55 +206,49 @@ public class PipelineController {
 
     private void doOnComplete(String serviceName) {
         System.out.println("*".repeat(60) +
-                "[%s] %s Completed".formatted(serviceName, Thread.currentThread()) +
+                " [%s] %s Completed ".formatted(serviceName, Thread.currentThread().getName()) +
                 "*".repeat(60));
     }
 
     private void doOnCancel(String serviceName) {
         System.out.println("*".repeat(60) +
-                "[%s] %s Canceled".formatted(serviceName, Thread.currentThread()) +
+                " [%s] %s Canceled ".formatted(serviceName, Thread.currentThread().getName()) +
                 "*".repeat(60)
         );
     }
 
     private void doOnError(Throwable t, String serviceName) {
         System.out.println("*".repeat(60) +
-                "[%s] %s Error: []".formatted(serviceName, Thread.currentThread(), t) +
+                " [%s] %s Error: [%s] ".formatted(serviceName, Thread.currentThread().getName(), t.getMessage()) +
                 "*".repeat(60));
     }
 
     private void doOnTerminate(String serviceName) {
         System.out.println("*".repeat(60) +
-                "[%s] %s Terminated".formatted(serviceName, Thread.currentThread()) +
+                "[%s] %s Terminated".formatted(serviceName, Thread.currentThread().getName()) +
                 "*".repeat(60));
     }
 
     private void doOnRequest(Long l, String serviceName) {
-        System.out.println("*".repeat(60) +
-                "[%s] %s Requested %s".formatted(serviceName, Thread.currentThread(), l) +
-                "*".repeat(60));
+        System.out.println("*".repeat(50) +
+                " [%s] %s Requested %s ".formatted(serviceName, Thread.currentThread().getName(), l) +
+                "*".repeat(50));
     }
 
 
     private void print(String serviceName) {
-        System.out.print("\033[H\033[2J");
-        System.out.flush();
         System.out.println(
                 """
                                                     Service: %s;
                                                     Thread: %s;
                         Count A: %s;
                         Count B: %s;
-                                                    DirectBuffer: %s
-                                                    HeapMemory: %s
                         ==================================================================
                         """
                         .formatted(
                                 serviceName,
-                                Thread.currentThread(),
+                                Thread.currentThread().getName(),
                                 counterA.get(),
-                                counterB.get(),
-                                metric.usedDirectMemory(),
-                                metric.usedHeapMemory()));
+                                counterB.get()));
     }
 }
